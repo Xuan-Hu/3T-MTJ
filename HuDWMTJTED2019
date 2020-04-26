@@ -1,0 +1,615 @@
+// VerilogA for 7V88_DWMTJ, DW1, veriloga
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+
+nature distance 
+  access = Metr;
+  units = "m";
+  abstol = 0.01n;
+endnature
+ 
+discipline Distance
+  potential distance;
+enddiscipline
+
+module DW_190912(P, Q, DW_Position, RA, DW_Velocity, DW_MC, DW_Req);
+
+
+inout P, Q;					//P is defined as the left port of the DW track, and Q is the right port.
+inout RA;					//MTJ output port
+output DW_Position;			//This port measures the DW position, in unit of meter
+output DW_Velocity;			//This port measures the DW velocity, in unit of meter
+output DW_MC;				//This port measures the effective DW track current, converted into unit of meter. e.g. 1 uA => 1 uM.
+
+
+
+electrical P, Q;
+electrical RA;
+
+electrical Vmiddle;
+
+
+Distance DW_Position;
+Distance DW_Velocity;
+Distance DW_MC;
+Distance DW_Req;
+
+
+parameter real Rp = 1k;
+parameter real Rap = 1M;
+parameter real R_init = 10k;
+
+
+parameter real I_thR = 1u;
+parameter real I_thL = -1u;
+
+
+
+parameter real Rtotal = 3.9k;
+
+
+
+parameter real Pdw_init = 0;
+parameter real Pdw_limit = 120n;
+parameter real Pdw_low = 20n;
+parameter real Pdw_high = 40n;
+
+//------------------------------------MTJ resistance voltage dependence section
+
+parameter real Switch_MTJ_VoltageDependent = 0;
+
+parameter real MTJ_VoltageDependent_Factor = 1;
+
+parameter real MTJ_VoltageDependent_MinValue = 0.4; 
+
+
+
+
+//------------------------------------MTJ resistance voltage dependence section end
+
+
+parameter real dt = 1e-3;
+parameter real dtt = 1e-3;
+
+//---------------------------DW velocity parameters
+
+parameter real Areaa = 12.5e-18;
+//parameter real OtherFs = 5.2e-11;
+
+parameter real K_repel = 0.25;
+
+
+//parameter real Vrepel = 1e-9;
+
+//parameter real trepel = 1e-9;
+//---------------------------DW drift parameters
+
+parameter real alpha = 0.01;
+parameter real DW_width = 10n;
+
+
+
+
+parameter real g = 2.1;		//Lande Factor
+parameter real Pol = 0.7;		//Polarization
+parameter real uB = 9.274e-24;	//Bohr magneton
+parameter real e = 1.602e-19;	//electron
+parameter real Msat = 800e3;		//Msat
+
+
+
+real V_factor;
+
+
+
+
+
+//parameter real accel = 1;
+//parameter real accel_neg = -1;
+
+
+
+
+
+
+real MC;
+real MC_last;
+real MC_segment;
+real MC_discharge;
+
+real Pdw;
+real Pdw_last;
+
+real Vdw;
+real Vdw_last;
+
+real Req;
+
+real RR;
+real RL;
+
+real DW_Flag;
+real MC_Flag;
+real MC_Flag_Last;
+
+real IT1;
+real IT2;
+
+//----------------DW velocity variables
+
+real Jdenss;
+real Vtest;
+real V_cache;
+real V_repel;
+
+real MC_cache;
+
+
+//---------------DW drift variables
+real Xdw;
+real Xdw_last;
+real Xdw_cache;
+
+
+real DW_reverse_toward_right;
+real DW_reverse_toward_left;
+
+real DW_Flag_cache;
+real I_Flag;
+
+real IPPQQ;
+real IPQPQ;
+
+
+real Flag_repelling;			//if the DW is in the repelling region
+real t_cache;					//cache for repel time calculation
+real t_last;					//cache_last for repel time calculation
+
+real P_move;					//DW motion before being repelled
+real P_drift;					//DW motion due to the momentum (after current is removed/below threshold)
+real P_repel;					//DW motion repelled by the track edge
+
+real P_edge_move;				//Initial point of corresponding DW motion
+real P_edge_drift;
+real P_edge_repel;
+
+real Flag_exhaust_repel;		//Flag==1 if the repelling energy(time, distance) is exhausted
+real Flag_move;					//Flag==1 if the domain wall is moving by the current
+real Flag_drift;				//Flag==1 if the domain wall is moving without the current (include both drift and repel)
+
+//real Req_init;
+
+
+real V_neg;
+
+
+//------------------------------------MTJ resistance voltage dependence section
+
+real Rp_eq;
+
+real Rap_eq;
+
+real VMTJ_eq; 
+
+
+
+
+//------------------------------------MTJ resistance voltage dependence section end
+
+
+
+
+
+
+//real Vmiddle;
+
+
+analog
+begin
+	@(initial_step)
+	begin
+
+		Rp_eq = Rp;
+		Rap_eq = Rap;
+
+
+		Pdw = Pdw_init;
+		Pdw_last = Pdw_init;
+		
+		Vdw = 0;
+		Vdw_last = 0;
+
+
+		MC_segment = 0;
+		MC = 0;
+		MC_last = 0;
+		
+		//Req = (( (Pdw_limit - Pdw) / (Pdw_limit) ) * Rap ) + (( (Pdw) / (Pdw_limit) ) * Rp ) ; 		
+		Req = R_init;
+
+		DW_Flag = 0;
+		MC_Flag = 0;
+		MC_Flag_Last = 0;
+
+		V_cache = 0;
+
+
+		I_Flag = 0;
+
+		t_cache = 0;
+		t_last = 0;
+		
+		Flag_repelling = 0;
+
+
+		P_move = 0;
+		P_drift = 0;
+		P_repel = 0;
+
+		P_edge_move = 0; 
+		P_edge_drift = 0;
+		P_edge_repel = 0;
+		Flag_exhaust_repel = 0;
+		Flag_move = 0;
+		Flag_drift = 0;
+
+	end
+
+
+
+
+
+//	IPQPQ = I(P, Q);
+//	IPPQQ = I(P, P) - I(Q, Q);
+
+	if(Pdw < ((Pdw_low + Pdw_high)/2))
+	begin
+		IPQPQ = I(P, Vmiddle);
+	end
+	else
+	begin
+		IPQPQ = I(Vmiddle, Q);
+	end
+
+	Jdenss = (IPQPQ / Areaa);
+
+	Xdw = (DW_width / (2 * alpha));
+	
+
+
+	V_factor = (g * Pol * uB)/(2 * e * Msat);
+
+
+
+//	if (I(P, Q) >= I_thR)		//Moving LEFT
+	if(IPQPQ >= I_thR)
+	begin
+		DW_Flag = -1;
+
+		Vtest = -Jdenss * V_factor * 1e-9;
+	
+		V_cache = Vdw;	
+		Vdw = Vtest;
+	
+		if(V_cache > Vtest)
+		begin
+			V_cache = Vtest;
+		end
+
+
+
+		DW_Flag_cache = -1;
+		I_Flag = -1;
+		
+
+		P_drift = 0;
+		P_repel = 0;
+
+
+
+		V_neg = - V_cache;
+
+
+	end
+
+
+
+//	else if (I(P, Q) <= I_thL)	//Moving RIGHT
+	else if (IPQPQ <= I_thL)
+	begin
+
+		DW_Flag = 1;
+
+
+		Vtest = -Jdenss * V_factor * 1e-9;
+
+		V_cache = Vdw;
+		Vdw = Vtest;
+
+		if(V_cache < Vtest)
+		begin
+			V_cache = Vtest;
+		end
+	
+
+		
+
+		DW_Flag_cache = 1;
+
+		I_Flag =1;
+
+
+
+		P_drift = 0;
+		P_repel = 0;
+
+
+		V_neg = - V_cache;
+
+	end
+	
+	else
+	begin
+
+		DW_Flag = 0;
+
+		I_Flag = 0;
+
+	end
+		
+
+
+		if(DW_Flag == 0 && DW_Flag_cache ==1)
+		begin
+			DW_Flag = 2;
+			DW_Flag_cache = 0;
+
+			P_edge_drift = Pdw;
+
+
+		end
+
+		if(DW_Flag == 0 && DW_Flag_cache == -1)
+		begin
+			DW_Flag = -2;
+			DW_Flag_cache = 0;
+
+
+			P_edge_drift = Pdw;
+
+
+		end
+ 
+
+
+		if(DW_Flag != 0)
+		begin
+			Xdw_cache = Xdw;
+			Xdw_last = Xdw;
+		end
+	
+		else
+		begin
+
+			Xdw_cache = Xdw_last - (abs(V_cache) * dt);
+
+
+			if(Xdw_cache <=0)
+			begin
+				V_cache = 0;
+				Xdw_cache = 0;
+
+			end
+
+
+			Xdw_last = Xdw_cache;
+	
+		end
+
+
+		
+
+	
+
+
+
+
+		Vdw = V_cache;
+		Pdw = Pdw_last + Vdw * dt;
+
+
+//\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\DW drift and repel core; determing the repelling point
+
+	if(DW_Flag ==0)	//---------------repelling enabled
+	begin
+
+		if(Pdw < 0)
+		begin
+			DW_reverse_toward_right = 1;
+			Pdw = 0;
+
+			P_drift = abs(Pdw - P_edge_drift);
+
+			P_repel = K_repel*P_drift;
+
+		end
+		
+		else if(Pdw > Pdw_limit)
+		begin
+			DW_reverse_toward_right = -1;
+			Pdw = Pdw_limit;
+			
+			P_drift = abs(Pdw - P_edge_drift);
+
+			P_repel = K_repel*P_drift;
+
+		end
+		else
+		begin
+			DW_reverse_toward_right = 0;
+			DW_reverse_toward_left = 0;
+		end
+
+	
+
+		if(DW_reverse_toward_right == 1)
+		begin
+		V_cache = V_neg;
+
+		P_edge_repel = Pdw;
+	
+		Flag_repelling = 1;
+		end
+			
+		if(DW_reverse_toward_right == -1)
+		begin
+
+		V_cache = V_neg;
+
+		P_edge_repel = Pdw;
+
+		Flag_repelling = 1;
+		end
+
+	end
+
+
+
+	else		//---------------------------current dominating region
+	begin
+
+		DW_reverse_toward_right = 0;
+		DW_reverse_toward_left = 0;
+
+		if(Pdw < 0)
+		begin
+			Pdw = 0;
+		end
+		
+		if(Pdw > Pdw_limit)
+		begin
+			Pdw = Pdw_limit;	
+		end
+
+
+	end
+
+
+
+
+//\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\DW drift and repel core; determing the repelling point
+
+
+//---------------------------------------the repel time is taking into account
+
+	if(Flag_repelling == 1)
+	begin
+		t_cache = (t_last + 1);
+		t_last = t_cache;
+
+
+		if(abs(Pdw - P_edge_repel) > P_repel)
+		begin
+
+			Flag_exhaust_repel = 1;
+
+			V_cache = 0;
+			Flag_repelling = 0;
+
+		end
+		else
+		begin
+			Flag_exhaust_repel = 0;
+		end
+
+	end
+
+
+
+//------------------------------------MTJ resistance voltage dependence section
+
+if(Switch_MTJ_VoltageDependent == 1)
+begin
+	
+	VMTJ_eq = V(RA, Vmiddle);
+
+	Rap_eq = (1 - VMTJ_eq * MTJ_VoltageDependent_Factor) * Rap;
+
+	if(Rap_eq < MTJ_VoltageDependent_MinValue * Rap)
+	begin
+		Rap_eq = MTJ_VoltageDependent_MinValue * Rap;
+	end
+
+end
+
+
+
+
+//------------------------------------MTJ resistance voltage dependence section end
+
+
+	Pdw_last = Pdw;
+
+
+	if(Pdw <= Pdw_low && Pdw >=0)
+	begin
+		Req = Rp_eq;
+	end
+	else if(Pdw >= Pdw_high && Pdw <= Pdw_limit)
+	begin
+		Req = Rap_eq;
+	end
+	else
+	begin 
+
+		Req = ((Pdw_high - Pdw_low) * Rp_eq * Rap_eq) / ((Rp_eq * (Pdw - Pdw_low)) + ( Rap_eq * (Pdw_high - Pdw)));
+	end
+
+
+
+/*		//	Convert to Buffer
+	if(Pdw <= Pdw_low && Pdw >=0)
+	begin
+		Req = Rap_eq;
+	end
+	else if(Pdw >= Pdw_high && Pdw <= Pdw_limit)
+	begin
+		Req = Rp_eq;
+	end
+	else
+	begin
+		Req = ((Pdw_high - Pdw_low) * Rp_eq * Rap_eq) / ((Rap_eq * (Pdw - Pdw_low)) + ( Rp_eq * (Pdw_high - Pdw)));
+	end
+*/
+
+
+
+	RR = (Pdw_limit-Pdw_low-10n)/(Pdw_limit)*Rtotal;
+	RL = Rtotal - RR;
+
+
+
+
+I(P, Vmiddle) <+ V(P, Vmiddle) / RL;
+I(Q, Vmiddle) <+ V(Q, Vmiddle) / RR;
+
+I(Vmiddle, RA) <+ V(Vmiddle, RA) / Req;
+
+
+
+
+
+
+	Metr(DW_Req) <+ Req;
+	Metr(DW_Position) <+ Pdw;
+	Metr(DW_Velocity) <+ V(Vmiddle);
+	Metr(DW_MC) <+ IPQPQ;
+
+
+
+
+
+end
+endmodule
